@@ -1,11 +1,13 @@
-import unittest
 import six
 
-from locust.core import HttpLocust, Locust, TaskSet, task, events
-from locust import ResponseError, InterruptTaskSet
-from locust.exception import CatchResponseError, RescheduleTask, RescheduleTaskImmediately, LocustError
+from locust import InterruptTaskSet, ResponseError
+from locust.core import HttpLocust, Locust, TaskSet, events, task
+from locust.exception import (CatchResponseError, LocustError, RescheduleTask,
+                              RescheduleTaskImmediately)
 
+from locust.wait_time import between, constant
 from .testcases import LocustTestCase, WebserverTestCase
+
 
 class TestTaskSet(LocustTestCase):
     def setUp(self):
@@ -176,10 +178,17 @@ class TestTaskSet(LocustTestCase):
         taskset = MyTaskSet3(self.locust)
         self.assertEqual(len(taskset.tasks), 3)
     
+    def test_wait_function(self):
+        class MyTaskSet(TaskSet):
+            a = 1
+            b = 2
+            wait_time = lambda self: 1 + (self.b-self.a)
+        taskset = MyTaskSet(self.locust)
+        self.assertEqual(taskset.wait_time(), 2.0)
+    
     def test_sub_taskset(self):
         class MySubTaskSet(TaskSet):
-            min_wait = 1
-            max_wait = 1
+            constant(1)
             @task()
             def a_task(self):
                 self.locust.sub_locust_task_executed = True
@@ -198,8 +207,7 @@ class TestTaskSet(LocustTestCase):
         class MyTaskSet(TaskSet):
             @task
             class MySubTaskSet(TaskSet):
-                min_wait = 1
-                max_wait = 1
+                wait_time = constant(0.001)
                 @task()
                 def a_task(self):
                     self.locust.sub_locust_task_executed = True
@@ -213,8 +221,7 @@ class TestTaskSet(LocustTestCase):
     
     def test_sub_taskset_arguments(self):
         class MySubTaskSet(TaskSet):
-            min_wait = 1
-            max_wait = 1
+            wait_time = constant(0.001)
             @task()
             def a_task(self):
                 self.locust.sub_taskset_args = self.args
@@ -403,7 +410,7 @@ class TestWebLocustClass(WebserverTestCase):
         self.assertEqual(401, unauthorized.client.get("/basic_auth").status_code)
     
     def test_log_request_name_argument(self):
-        from locust.stats import RequestStats, global_stats
+        from locust.stats import global_stats
         self.response = ""
         
         class MyLocust(HttpLocust):
@@ -460,7 +467,7 @@ class TestCatchResponse(WebserverTestCase):
         
         self.num_failures = 0
         self.num_success = 0
-        def on_failure(request_type, name, response_time, exception):
+        def on_failure(request_type, name, response_time, response_length, exception):
             self.num_failures += 1
             self.last_failure_exception = exception
         def on_success(**kwargs):
@@ -546,6 +553,6 @@ class TestCatchResponse(WebserverTestCase):
         with l.client.get("/", catch_response=True) as r:
             self.assertEqual(r.status_code, 0)
             self.assertEqual(None, r.content)
-            r.success()
-        self.assertEqual(1, self.num_success)
-        self.assertEqual(0, self.num_failures)
+            r.failure("Manual fail")
+        self.assertEqual(0, self.num_success)
+        self.assertEqual(1, self.num_failures)
