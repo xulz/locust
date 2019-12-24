@@ -20,6 +20,5 @@ def get_unique_datetime():
     return time.strftime("%d%H%M", time.localtime())
 
 
-def get_unique_mobile(locust_id):
-    ip_suffix = get_ip_suffix()
+def get_unique_mobile(locust_id, ip_suffix="000"):
     return "123{}{:05}".format(ip_suffix, int(locust_id))
