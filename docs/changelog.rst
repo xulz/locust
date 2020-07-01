@@ -4,6 +4,185 @@ Changelog Highlights
 
 For full details of the Locust changelog, please see https://github.com/locustio/locust/blob/master/CHANGELOG.md
 
+1.1
+===
+
+* The official Docker image is now based on the ``python:3.8`` image instead of ``python:3.8-alpine``. This should 
+  make it easier to install other python packages when extending the locust docker image.
+* Allow Users to stop the runner by calling self.environment.runner.quit() (without deadlocking sometimes)
+* Cut to only 5% free space on the top of the graphs
+* Use csv module to generate csv data (solves issues with sample names that need escaping in csv)
+* Various documentation improvements
+
+1.0.3
+=====
+
+* Ability to control the exit code of the Locust process by setting :py:attr:`Environment.process_exit_code <locust.env.Environment.process_exit_code>`
+* FastHttpLocust: Change dependency to use original geventhttpclient (now that releases can be made there) instead of geventhttpclient-wheels
+* Fix search on readthedocs
+
+1.0.2
+=====
+
+* Check for low open files limit (ulimit) and try to automatically increase it from within the locust process.
+* Other various bug fixes as improvements
+
+
+.. _changelog-1-0:
+
+1.0, 1.0.1
+==========
+
+This version contains some breaking changes.
+
+Locust class renamed to User
+----------------------------
+
+We've renamed the ``Locust`` and ``HttpLocust`` classes to ``User`` and ``HttpUser``. The ``locust`` attribute on 
+:py:class:`TaskSet <locust.TaskSet>` instances has been renamed to :py:attr:`user <locust.TaskSet.user>`.
+
+The parameter for setting number of users has also been changed, from ``-c`` / ``--clients`` to ``-u`` / ``--users``.
+
+Ability to declare @task directly under the ``User`` class
+----------------------------------------------------------
+
+It's now possible to declare tasks directly under a User class like this:
+
+.. code-block:: python
+
+    class WebUser(User):
+        @task
+        def some_task(self):
+            pass
+
+In tasks declared under a User class (e.g. ``some_task`` in the example above), ``self`` refers to the User 
+instance, as one would expect. For tasks defined under a :py:class:`TaskSet <locust.TaskSet>` class, ``self`` 
+would refer to the ``TaskSet`` instance.
+
+The ``task_set`` attribute on the ``User`` class (previously ``Locust`` class) has been removed. To declare a 
+``User`` class with a single ``TaskSet`` one would now use the the :py:attr:`tasks <locust.User.tasks>` 
+attribute instead:
+
+.. code-block:: python
+
+    class MyTaskSet(TaskSet):
+        ...
+    
+    class WebUser(User):
+        tasks = [MyTaskSet]
+
+
+Task tagging
+------------
+
+A new :ref:`tag feature <tagging-tasks>` has been added that makes it possible to include/exclude tasks during 
+a test run.
+
+Tasks can be tagged using the :py:func:`@tag <locust.tag>` decorator:
+
+.. code-block:: python
+
+    class WebUser(User):
+        @task
+        @tag("tag1", "tag2")
+        def my_task(self):
+            ...
+
+And tasks can then be specified/excluded using the ``--tags``/``-T`` and ``--exclude-tags``/``-E`` command line arguments. 
+
+
+Environment variables changed
+-----------------------------
+
+The following changes has been made to the configuration environment variables
+
+* ``LOCUST_MASTER`` has been renamed to ``LOCUST_MODE_MASTER`` (in order to make it less likely to get variable name collisions 
+  when running Locust in Kubernetes/K8s which automatically adds environment variables depending on service/pod names).
+* ``LOCUST_SLAVE`` has been renamed to ``LOCUST_MODE_WORKER``.
+* ``LOCUST_MASTER_PORT`` has been renamed to ``LOCUST_MASTER_NODE_PORT``.
+* ``LOCUST_MASTER_HOST`` has been renamed to ``LOCUST_MASTER_NODE_HOST``.
+* ``CSVFILEBASE`` has been renamed to ``LOCUST_CSV``.
+
+See the :ref:`configuration` documentation for a full list of available :ref:`environment variables <environment-variables>`.
+
+
+Other breaking changes
+----------------------
+
+* The master/slave terminology has been changed to master/worker. Therefore the command line arguments ``--slave`` and
+  ``--expect-slaves`` has been renamed to ``--worker`` and ``--expect-workers``.
+* The option for running Locust without the Web UI has been renamed from ``--no-web`` to ``--headless``.
+* Removed ``Locust.setup``, ``Locust.teardown``, ``TaskSet.setup`` and ``TaskSet.teardown`` hooks. If you want to 
+  run code at the start or end of a test, you should instead use the :py:attr:`test_start <locust.event.Events.test_start>`
+  and :py:attr:`test_stop <locust.event.Events.test_stop>` events:
+  
+  .. code-block:: python
+  
+      from locust import events
+      
+      @events.test_start.add_listener
+      def on_test_start(**kw):
+          print("test is starting")
+        
+      @events.test_stop.add_listener
+      def on_test_start(**kw):
+          print("test is stopping")
+* ``TaskSequence`` and ``@seq_task`` has been replaced with :ref:`SequentialTaskSet <sequential-taskset>`.
+* A ``User count`` column has been added to the history stats CSV file. The column order and column names has been changed.
+* The official docker image no longer uses a shell script with a bunch of special environment variables to configure how 
+  how locust is started. Instead, the ``locust`` command is now set as ``ENTRYPOINT`` of the docker image. See
+  :ref:`running-locust-docker` for more info.
+* Command line option ``--csv-base-name`` has been removed, since it was just an alias for ``--csv``.
+* The way Locust handles logging has been changed. We no longer wrap stdout (and stderr) to automatically make print 
+  statements go into the log. ``print()`` statements now only goes to stdout. To add custom entries to the log, one 
+  should now use the Python logging module:
+  
+  .. code-block:: python
+  
+      import logging
+      logging.info("custom logging message)
+  
+  For more info see :ref:`logging`
+
+
+Web UI improvements
+-------------------
+
+* It's now possible to protect the Web UI with Basic Auth using hte ``--web-auth`` command line argument.
+* The Web UI can now be served over HTTPS by specifying a TLS certificate and key with the ``--tls-cert`` 
+  and ``--tls-key`` command line arguments.
+* If the number of users and hatch rate are specified on command line, it's now used to pre-populate the input fields in 
+  the Web UI.
+
+
+
+Other fixes and improvements
+----------------------------
+
+* Added ``--config`` command line option for specifying a :ref:`configuration file <configuration-file>` path
+* The code base has been refactored to make it possible to run :ref:`Locust as a python lib <use-as-lib>`. 
+* It's now possible to call ``response.failure()`` or ``response.success()`` multiple times when using 
+  the ``catch_response=True`` in the HTTP clients. Only the last call to ``success``/``failure`` will count.
+* The ``--help`` output has been improved by grouping related options together.
+
+
+
+0.14.6
+======
+
+* Fix bug when running with latest Gevent version, and pinned the latest version
+
+
+0.14.0
+======
+
+* Drop Python 2 and Python 3.5 support!
+* Continuously measure CPU usage and emit a warning if we get a five second average above 90%
+* Show CPU usage of slave nodes in the Web UI
+* Fixed issue when running Locust distributed and new slave nodes connected during the hatching/ramp-up 
+  phase (https://github.com/locustio/locust/issues/1168)
+
+
 0.13.5
 ======
 
@@ -250,7 +429,7 @@ Now RequestStats should be instantiated and holds the global stats, as well as a
 Removed support for avg_wait
 ----------------------------
 
-Previously one could specify avg_wait to :py:class:`TaskSet` and :py:class:`Locust` that Locust would try to strive to. However this can be sufficiently accomplished by using min_wait and max_wait for most use-cases. Therefore we've decided to remove the avg_wait as it's use-case is not clear or just too narrow to be in the Locust core.
+Previously one could specify avg_wait to :py:class:`TaskSet` and :py:class:`Locust` that Locust would try to strive to. However this can be sufficiently accomplished by using min_wait and max_wait for most use-cases. Therefore we've decided to remove the avg_wait as its use-case is not clear or just too narrow to be in the Locust core.
 
 Removed support for ramping
 ----------------------------

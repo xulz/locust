@@ -9,13 +9,13 @@ from io import BytesIO
 
 import gevent
 import gevent.pywsgi
-import six
 from flask import (Flask, Response, make_response, redirect, request,
                    send_file, stream_with_context)
 
-from locust import events
-from locust.log import console_logger
-from locust.stats import global_stats
+import locust
+from locust import log
+from locust.event import Events
+from locust.env import Environment
 from locust.test.mock_logging import MockedLoggingHandler
 
 
@@ -56,6 +56,10 @@ def request_header_test():
 @app.route("/put", methods=["PUT"])
 def manipulate():
     return str(request.form.get("arg", ""))
+
+@app.route("/get_arg", methods=["GET"])
+def get_arg():
+    return request.args.get("arg")
 
 @app.route("/fail")
 def failed_request():
@@ -124,12 +128,10 @@ class LocustTestCase(unittest.TestCase):
     def setUp(self):
         # Prevent args passed to test runner from being passed to Locust
         del sys.argv[1:]
-
-        self._event_handlers = {}
-        for name in dir(events):
-            event = getattr(events, name)
-            if isinstance(event, events.EventHook):
-                self._event_handlers[event] = copy(event._handlers)
+        
+        locust.events = Events()
+        self.environment = Environment(events=locust.events, catch_exceptions=False)
+        self.runner = self.environment.create_local_runner()
         
         # When running the tests in Python 3 we get warnings about unclosed sockets. 
         # This causes tests that depends on calls to sys.stderr to fail, so we'll 
@@ -145,25 +147,20 @@ class LocustTestCase(unittest.TestCase):
         # set up mocked logging handler
         self._logger_class = MockedLoggingHandler()
         self._logger_class.setLevel(logging.INFO)
-        console_logger.propagate = True
         self._root_log_handlers = [h for h in logging.root.handlers]
-        self._console_log_handlers = [h for h in console_logger.handlers]
         [logging.root.removeHandler(h) for h in logging.root.handlers]
-        [console_logger.removeHandler(h) for h in console_logger.handlers]
         logging.root.addHandler(self._logger_class)
         logging.root.setLevel(logging.INFO)
         self.mocked_log = MockedLoggingHandler
+        
+        # set unandled exception flag to False
+        log.unhandled_greenlet_exception = False
                       
     def tearDown(self):
-        for event, handlers in six.iteritems(self._event_handlers):
-            event._handlers = handlers
-        
         # restore logging class
         logging.root.removeHandler(self._logger_class)
         [logging.root.addHandler(h) for h in self._root_log_handlers]
-        [console_logger.addHandler(h) for h in self._console_log_handlers]
         self.mocked_log.reset()
-        console_logger.propagate = False
 
 
 class WebserverTestCase(LocustTestCase):
@@ -176,7 +173,6 @@ class WebserverTestCase(LocustTestCase):
         gevent.spawn(lambda: self._web_server.serve_forever())
         gevent.sleep(0.01)
         self.port = self._web_server.server_port
-        global_stats.clear_all()
 
     def tearDown(self):
         super(WebserverTestCase, self).tearDown()

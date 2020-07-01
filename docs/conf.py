@@ -9,6 +9,54 @@
 # serve to show the default value.
 
 import os
+import subprocess
+
+from locust.argument_parser import get_empty_argument_parser, setup_parser_arguments
+
+
+# Run command `locust --help` and store output in cli-help-output.txt which is included in the docs
+def save_locust_help_output():
+    cli_help_output_file = os.path.join(os.path.abspath(os.path.dirname(__file__)), "cli-help-output.txt")
+    print("Running `locust --help` command and storing output in %s" % cli_help_output_file)
+    help_output = subprocess.check_output(["locust", "--help"]).decode("utf-8")
+    with open(cli_help_output_file, "w") as f:
+        f.write(help_output)
+
+save_locust_help_output()
+
+# Generate RST table with help/descriptions for all available environment variables
+def save_locust_env_variables():
+    env_options_output_file = os.path.join(os.path.abspath(os.path.dirname(__file__)), "config-options.rst")
+    print("Generating RST table for Locust environment variables and storing in %s" % env_options_output_file)
+    parser = get_empty_argument_parser()
+    setup_parser_arguments(parser)
+    table_data = []
+    for action in parser._actions:
+        if action.env_var:
+            table_data.append((
+                ", ".join(["``%s``" % c for c in action.option_strings]), 
+                "``%s``" % action.env_var, 
+                ", ".join(["``%s``" % c for c in parser.get_possible_config_keys(action) if not c.startswith("--")]),
+                action.help,
+            ))
+    colsizes = [max(len(r[i]) for r in table_data) for i in range(len(table_data[0]))]
+    formatter = ' '.join('{:<%d}' % c for c in colsizes)
+    rows = [formatter.format(*row) for row in table_data]
+    edge = formatter.format(*['=' * c for c in colsizes])
+    divider = formatter.format(*['-' * c for c in colsizes])
+    headline = formatter.format(*["Command line", "Environment", "Config file", "Description"])
+    output = "\n".join([
+        edge,
+        headline,
+        divider,
+        "\n".join(rows),
+        edge,
+    ])
+    with open(env_options_output_file, "w") as f:
+        f.write(output)
+
+save_locust_env_variables()
+
 
 # The default replacements for |version| and |release|, also used in various
 # other places throughout the built documents.
@@ -21,10 +69,12 @@ from locust import __version__
 
 # Add any Sphinx extension module names here, as strings. They can be extensions
 # coming with Sphinx (named 'sphinx.ext.*') or your custom ones.
-extensions = ["sphinx.ext.autodoc", "sphinx.ext.intersphinx"]
+extensions = ["sphinx.ext.autodoc", "sphinx.ext.intersphinx", 'sphinx_search.extension']
 
 # autoclass options
 #autoclass_content = "both"
+
+autodoc_typehints = 'none' # I would have liked to use 'description' but unfortunately it too is very verbose
 
 # Add any paths that contain templates here, relative to this directory.
 #templates_path = ["_templates"]
@@ -87,6 +137,14 @@ if not on_rtd:  # only import and set the theme if we're building docs locally
     import sphinx_rtd_theme
     html_theme = 'sphinx_rtd_theme'
     html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
+
+
+# Custom CSS overrides
+html_static_path = ["_static"]
+html_context = {
+    "css_files": ["_static/theme-overrides.css", "_static/css/rtd_sphinx_search.min.css"],
+}
+
 
 # HTML theme
 #html_theme = "haiku"

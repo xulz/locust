@@ -39,7 +39,9 @@ Running your Locust tests
 .. toctree ::
     :maxdepth: 1
 
+    configuration
     running-locust-distributed
+    running-locust-docker
     running-locust-without-web-ui
     increase-performance
 
@@ -50,17 +52,19 @@ Other functionalities
 .. toctree ::
     :maxdepth: 2
 
+    running-locust-in-step-load-mode
     retrieving-stats
     testing-other-systems
     extending-locust
     logging
+    use-as-lib
 
 
 API
 ---
 .. toctree ::
     :maxdepth: 4
-    
+
     api
 
 

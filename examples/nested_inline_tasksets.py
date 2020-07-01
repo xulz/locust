@@ -1,14 +1,15 @@
-from locust import HttpLocust, TaskSet, task, between
+from locust import HttpUser, TaskSet, task, between
 
 
-class WebsiteUser(HttpLocust):
+class WebsiteUser(HttpUser):
     """
     Example of the ability of inline nested TaskSet classes
     """
     host = "http://127.0.0.1:8089"
     wait_time = between(2, 5)
-    
-    class task_set(TaskSet):
+
+    @task
+    class TopLevelTaskSet(TaskSet):
         @task
         class IndexTaskSet(TaskSet):
             @task(10)
@@ -22,4 +23,3 @@ class WebsiteUser(HttpLocust):
         @task
         def stats(self):
             self.client.get("/stats/requests")
-

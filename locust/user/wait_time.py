@@ -8,7 +8,7 @@ def between(min_wait, max_wait):
     
     Example::
     
-        class User(Locust):
+        class MyUser(User):
             # wait between 3.0 and 10.5 seconds after each task
             wait_time = between(3.0, 10.5)
     """
@@ -21,7 +21,7 @@ def constant(wait_time):
     
     Example::
     
-        class User(Locust):
+        class MyUser(User):
             wait_time = constant(3)
     """
     return lambda instance: wait_time
@@ -36,12 +36,11 @@ def constant_pacing(wait_time):
     In the following example the task will always be executed once every second, no matter 
     the task execution time::
     
-        class User(Locust):
+        class MyUser(User):
             wait_time = constant_pacing(1)
-            class task_set(TaskSet):
-                @task
-                def my_task(self):
-                    time.sleep(random.random())
+            @task
+            def my_task(self):
+                time.sleep(random.random())
     
     If a task execution exceeds the specified wait_time, the wait will be 0 before starting 
     the next task.

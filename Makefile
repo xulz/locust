@@ -5,10 +5,13 @@ test:
 	tox
 
 build:
-	rm -f dist/* && python setup.py sdist bdist_wheel
+	rm -f dist/* && python3 setup.py sdist bdist_wheel
 
 release: build
 	twine upload dist/*
 
 build_docs:
 	sphinx-build -b html docs/ docs/_build/
+
+changelog:
+	python3 generate_changelog.py

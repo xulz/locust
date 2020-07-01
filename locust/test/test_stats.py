@@ -1,16 +1,22 @@
+import csv
 import time
 import unittest
 import re
+import os
+import json
 
+import gevent
+import mock
 import locust
-from locust.core import HttpLocust, TaskSet, task
-from locust.inspectlocust import get_task_ratio_dict
+from locust import HttpUser, TaskSet, task, User, constant
+from locust.env import Environment
 from locust.rpc.protocol import Message
-from locust.stats import CachedResponseTimes, RequestStats, StatsEntry, diff_response_time_dicts, global_stats
+from locust.stats import CachedResponseTimes, RequestStats, StatsEntry, diff_response_time_dicts, stats_writer
 from locust.test.testcases import LocustTestCase
-from six.moves import xrange
+from locust.user.inspectuser import get_task_ratio_dict
 
 from .testcases import WebserverTestCase
+from .test_runners import mocked_rpc
 
 
 class TestRequestStats(unittest.TestCase):
@@ -36,7 +42,7 @@ class TestRequestStats(unittest.TestCase):
 
     def test_percentile(self):
         s = StatsEntry(self.stats, "percentile_test", "GET")
-        for x in xrange(100):
+        for x in range(100):
             s.log(x, 0)
 
         self.assertEqual(s.get_response_time_percentile(0.5), 50)
@@ -170,6 +176,17 @@ class TestRequestStats(unittest.TestCase):
         self.assertEqual(s1.avg_response_time, 535.75)
         self.assertEqual(s1.min_response_time, 122)
         self.assertEqual(s1.max_response_time, 992)
+    
+    def test_aggregation_with_decimal_rounding(self):
+        s1 = StatsEntry(self.stats, "round me!", "GET")
+        s1.log(1.1, 0)
+        s1.log(1.99, 0)
+        s1.log(3.1, 0)
+        self.assertEqual(s1.num_requests, 3)
+        self.assertEqual(s1.median_response_time, 2)
+        self.assertEqual(s1.avg_response_time, (1.1+1.99+3.1)/3)
+        self.assertEqual(s1.min_response_time, 1.1)
+        self.assertEqual(s1.max_response_time, 3.1)
 
     def test_aggregation_min_response_time(self):
         s1 = StatsEntry(self.stats, "min", "GET")
@@ -241,7 +258,7 @@ class TestRequestStats(unittest.TestCase):
         """
         Serialize a RequestStats instance, then serialize it through a Message, 
         and unserialize the whole thing again. This is done "IRL" when stats are sent 
-        from slaves to master.
+        from workers to master.
         """
         s1 = StatsEntry(self.stats, "test", "GET")
         s1.log(10, 0)
@@ -267,6 +284,163 @@ class TestStatsPrinting(LocustTestCase):
         headlines = info[1].replace("# reqs", "#reqs").split()
         self.assertEqual(len(headlines), len(info[3].split()))
         self.assertEqual(len(headlines), len(info[5].split()))
+
+
+class TestCsvStats(LocustTestCase):
+    STATS_BASE_NAME = "test"
+    STATS_FILENAME = "{}_stats.csv".format(STATS_BASE_NAME)
+    STATS_HISTORY_FILENAME = "{}_stats_history.csv".format(STATS_BASE_NAME)
+    STATS_FAILURES_FILENAME = "{}_failures.csv".format(STATS_BASE_NAME)
+
+    def setUp(self):
+        super().setUp()
+        self.remove_file_if_exists(self.STATS_FILENAME)
+        self.remove_file_if_exists(self.STATS_HISTORY_FILENAME)
+        self.remove_file_if_exists(self.STATS_FAILURES_FILENAME)
+
+    def tearDown(self):
+        self.remove_file_if_exists(self.STATS_FILENAME)
+        self.remove_file_if_exists(self.STATS_HISTORY_FILENAME)
+        self.remove_file_if_exists(self.STATS_FAILURES_FILENAME)
+
+    def remove_file_if_exists(self, filename):
+        if os.path.exists(filename):
+            os.remove(filename)
+
+    def test_write_csv_files(self):
+        locust.stats.write_csv_files(self.environment, self.STATS_BASE_NAME)
+        self.assertTrue(os.path.exists(self.STATS_FILENAME))
+        self.assertTrue(os.path.exists(self.STATS_HISTORY_FILENAME))
+        self.assertTrue(os.path.exists(self.STATS_FAILURES_FILENAME))
+    
+    def test_write_csv_files_full_history(self):
+        locust.stats.write_csv_files(self.environment, self.STATS_BASE_NAME, full_history=True)
+        self.assertTrue(os.path.exists(self.STATS_FILENAME))
+        self.assertTrue(os.path.exists(self.STATS_HISTORY_FILENAME))
+        self.assertTrue(os.path.exists(self.STATS_FAILURES_FILENAME))
+    
+    @mock.patch("locust.stats.CSV_STATS_INTERVAL_SEC", new=0.2)
+    def test_csv_stats_writer(self):
+        greenlet = gevent.spawn(stats_writer, self.environment, self.STATS_BASE_NAME)
+        gevent.sleep(0.21)
+        gevent.kill(greenlet)
+        self.assertTrue(os.path.exists(self.STATS_FILENAME))
+        self.assertTrue(os.path.exists(self.STATS_HISTORY_FILENAME))
+        self.assertTrue(os.path.exists(self.STATS_FAILURES_FILENAME))
+        
+        with open(self.STATS_HISTORY_FILENAME) as f:
+            reader = csv.DictReader(f)
+            rows = [r for r in reader]
+        
+        self.assertEqual(2, len(rows))
+        self.assertEqual("Aggregated", rows[0]["Name"])
+        self.assertEqual("Aggregated", rows[1]["Name"])
+    
+    @mock.patch("locust.stats.CSV_STATS_INTERVAL_SEC", new=0.2)
+    def test_csv_stats_writer_full_history(self):
+        self.runner.stats.log_request("GET", "/", 10, content_length=666)
+        greenlet = gevent.spawn(stats_writer, self.environment, self.STATS_BASE_NAME, full_history=True)
+        gevent.sleep(0.21)
+        gevent.kill(greenlet)
+        self.assertTrue(os.path.exists(self.STATS_FILENAME))
+        self.assertTrue(os.path.exists(self.STATS_HISTORY_FILENAME))
+        self.assertTrue(os.path.exists(self.STATS_FAILURES_FILENAME))
+        
+        with open(self.STATS_HISTORY_FILENAME) as f:
+            reader = csv.DictReader(f)
+            rows = [r for r in reader]
+        
+        self.assertEqual(4, len(rows))
+        self.assertEqual("/", rows[0]["Name"])
+        self.assertEqual("Aggregated", rows[1]["Name"])
+        self.assertEqual("/", rows[2]["Name"])
+        self.assertEqual("Aggregated", rows[3]["Name"])
+    
+    def test_csv_stats_on_master_from_aggregated_stats(self):
+        # Failing test for: https://github.com/locustio/locust/issues/1315
+        with mock.patch("locust.rpc.rpc.Server", mocked_rpc()) as server:
+            environment = Environment()
+            master = environment.create_master_runner(master_bind_host="*", master_bind_port=0)
+            server.mocked_send(Message("client_ready", None, "fake_client"))
+            
+            master.stats.get("/", "GET").log(100, 23455)
+            master.stats.get("/", "GET").log(800, 23455)
+            master.stats.get("/", "GET").log(700, 23455)
+            
+            data = {"user_count":1}
+            environment.events.report_to_master.fire(client_id="fake_client", data=data)
+            master.stats.clear_all()
+            
+            server.mocked_send(Message("stats", data, "fake_client"))
+            s = master.stats.get("/", "GET")
+            self.assertEqual(700, s.median_response_time)
+            
+            locust.stats.write_csv_files(environment, self.STATS_BASE_NAME, full_history=True)
+            self.assertTrue(os.path.exists(self.STATS_FILENAME))
+            self.assertTrue(os.path.exists(self.STATS_HISTORY_FILENAME))
+            self.assertTrue(os.path.exists(self.STATS_FAILURES_FILENAME))
+    
+    @mock.patch("locust.stats.CSV_STATS_INTERVAL_SEC", new=0.2)
+    def test_user_count_in_csv_history_stats(self):
+        start_time = int(time.time())
+        class TestUser(User):
+            wait_time = constant(10)
+            @task
+            def t(self):
+                self.environment.runner.stats.log_request("GET", "/", 10, 10)
+        environment = Environment(user_classes=[TestUser])
+        runner = environment.create_local_runner()
+        runner.start(3, 5) # spawn a user every 0.2 second
+        gevent.sleep(0.1)
+        
+        greenlet = gevent.spawn(stats_writer, environment, self.STATS_BASE_NAME, full_history=True)
+        gevent.sleep(0.6)
+        gevent.kill(greenlet)
+        
+        runner.stop()
+        
+        with open(self.STATS_HISTORY_FILENAME) as f:
+            reader = csv.DictReader(f)
+            rows = [r for r in reader]
+        
+        self.assertEqual(6, len(rows))
+        for i in range(3):
+            row = rows.pop(0)
+            self.assertEqual("%i" % (i + 1), row["User Count"])
+            self.assertEqual("/", row["Name"])
+            self.assertEqual("%i" % (i + 1), row["Total Request Count"])
+            self.assertGreaterEqual(int(row["Timestamp"]), start_time)
+            row = rows.pop(0)
+            self.assertEqual("%i" % (i + 1), row["User Count"])
+            self.assertEqual("Aggregated", row["Name"])
+            self.assertEqual("%i" % (i + 1), row["Total Request Count"])
+            self.assertGreaterEqual(int(row["Timestamp"]), start_time)
+
+    def test_requests_csv_quote_escaping(self):
+        with mock.patch("locust.rpc.rpc.Server", mocked_rpc()) as server:
+            environment = Environment()
+            master = environment.create_master_runner(master_bind_host="*", master_bind_port=0)
+            server.mocked_send(Message("client_ready", None, "fake_client"))
+
+            request_name_dict = {
+                "scenario": "get cashes",
+                "path": "/cash/[amount]",
+                "arguments": [{"size": 1}],
+            }
+            request_name_str = json.dumps(request_name_dict)
+
+            master.stats.get(request_name_str, "GET").log(100, 23455)
+            data = {"user_count": 1}
+            environment.events.report_to_master.fire(client_id="fake_client", data=data)
+            master.stats.clear_all()
+            server.mocked_send(Message("stats", data, "fake_client"))
+
+            locust.stats.write_csv_files(environment, self.STATS_BASE_NAME, full_history=True)
+            with open(self.STATS_FILENAME) as f:
+                reader = csv.DictReader(f)
+                rows = [r for r in reader]
+                csv_request_name = rows[0].get("Name")
+                self.assertEqual(request_name_str, csv_request_name)
 
 
 class TestStatsEntryResponseTimesCache(unittest.TestCase):
@@ -317,12 +491,12 @@ class TestStatsEntryResponseTimesCache(unittest.TestCase):
         s = StatsEntry(self.stats, "/", "GET", use_response_times_cache=True)
         t = int(time.time())
         s.response_times_cache[t-10] = CachedResponseTimes(
-            response_times={i:1 for i in xrange(100)},
+            response_times={i:1 for i in range(100)},
             num_requests=200
         )
         s.response_times_cache[t-10].response_times[1] = 201
         
-        s.response_times = {i:2 for i in xrange(100)}
+        s.response_times = {i:2 for i in range(100)}
         s.response_times[1] = 202
         s.num_requests = 300
         
@@ -415,65 +589,49 @@ class TestStatsEntry(unittest.TestCase):
 
 
 class TestRequestStatsWithWebserver(WebserverTestCase):
-    def test_request_stats_content_length(self):
-        class MyLocust(HttpLocust):
+    def setUp(self):
+        super().setUp()
+        class MyUser(HttpUser):
             host = "http://127.0.0.1:%i" % self.port
+        self.locust = MyUser(self.environment)
     
-        locust = MyLocust()
-        locust.client.get("/ultra_fast")
-        self.assertEqual(global_stats.get("/ultra_fast", "GET").avg_content_length, len("This is an ultra fast response"))
-        locust.client.get("/ultra_fast")
-        self.assertEqual(global_stats.get("/ultra_fast", "GET").avg_content_length, len("This is an ultra fast response"))
+    def test_request_stats_content_length(self):
+        self.locust.client.get("/ultra_fast")
+        self.assertEqual(self.runner.stats.get("/ultra_fast", "GET").avg_content_length, len("This is an ultra fast response"))
+        self.locust.client.get("/ultra_fast")
+        self.assertEqual(self.runner.stats.get("/ultra_fast", "GET").avg_content_length, len("This is an ultra fast response"))
     
     def test_request_stats_no_content_length(self):
-        class MyLocust(HttpLocust):
-            host = "http://127.0.0.1:%i" % self.port
-        l = MyLocust()
         path = "/no_content_length"
-        r = l.client.get(path)
-        self.assertEqual(global_stats.get(path, "GET").avg_content_length, len("This response does not have content-length in the header"))
+        r = self.locust.client.get(path)
+        self.assertEqual(self.runner.stats.get(path, "GET").avg_content_length, len("This response does not have content-length in the header"))
     
     def test_request_stats_no_content_length_streaming(self):
-        class MyLocust(HttpLocust):
-            host = "http://127.0.0.1:%i" % self.port
-        l = MyLocust()
         path = "/no_content_length"
-        r = l.client.get(path, stream=True)
-        self.assertEqual(0, global_stats.get(path, "GET").avg_content_length)
+        r = self.locust.client.get(path, stream=True)
+        self.assertEqual(0, self.runner.stats.get(path, "GET").avg_content_length)
     
     def test_request_stats_named_endpoint(self):
-        class MyLocust(HttpLocust):
-            host = "http://127.0.0.1:%i" % self.port
-    
-        locust = MyLocust()
-        locust.client.get("/ultra_fast", name="my_custom_name")
-        self.assertEqual(1, global_stats.get("my_custom_name", "GET").num_requests)
+        self.locust.client.get("/ultra_fast", name="my_custom_name")
+        self.assertEqual(1, self.runner.stats.get("my_custom_name", "GET").num_requests)
     
     def test_request_stats_query_variables(self):
-        class MyLocust(HttpLocust):
-            host = "http://127.0.0.1:%i" % self.port
-    
-        locust = MyLocust()
-        locust.client.get("/ultra_fast?query=1")
-        self.assertEqual(1, global_stats.get("/ultra_fast?query=1", "GET").num_requests)
+        self.locust.client.get("/ultra_fast?query=1")
+        self.assertEqual(1, self.runner.stats.get("/ultra_fast?query=1", "GET").num_requests)
     
     def test_request_stats_put(self):
-        class MyLocust(HttpLocust):
-            host = "http://127.0.0.1:%i" % self.port
-    
-        locust = MyLocust()
-        locust.client.put("/put")
-        self.assertEqual(1, global_stats.get("/put", "PUT").num_requests)
+        self.locust.client.put("/put")
+        self.assertEqual(1, self.runner.stats.get("/put", "PUT").num_requests)
     
     def test_request_connection_error(self):
-        class MyLocust(HttpLocust):
+        class MyUser(HttpUser):
             host = "http://localhost:1"
         
-        locust = MyLocust()
+        locust = MyUser(self.environment)
         response = locust.client.get("/", timeout=0.1)
         self.assertEqual(response.status_code, 0)
-        self.assertEqual(1, global_stats.get("/", "GET").num_failures)
-        self.assertEqual(1, global_stats.get("/", "GET").num_requests)
+        self.assertEqual(1, self.runner.stats.get("/", "GET").num_failures)
+        self.assertEqual(1, self.runner.stats.get("/", "GET").num_requests)
 
 
 class MyTaskSet(TaskSet):
@@ -490,7 +648,7 @@ class MyTaskSet(TaskSet):
         def task2(self):
             pass
     
-class TestInspectLocust(unittest.TestCase):
+class TestInspectUser(unittest.TestCase):
     def test_get_task_ratio_dict_relative(self):
         ratio = get_task_ratio_dict([MyTaskSet])
         self.assertEqual(1.0, ratio["MyTaskSet"]["ratio"])

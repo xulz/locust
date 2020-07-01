@@ -1,32 +1,25 @@
 from __future__ import absolute_import
 
 import re
-import six
 import socket
+import json
+import json as unshadowed_json # some methods take a named parameter called json
 from base64 import b64encode
-from six.moves.urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 from ssl import SSLError
 from timeit import default_timer
 
-if six.PY2:
-    from cookielib import CookieJar
-    class ConnectionRefusedError(Exception):
-        # ConnectionRefusedError doesn't exist in python 2, so we'll 
-        # define a dummy class to avoid a NameError
-        pass
-else:
-    from http.cookiejar import CookieJar
-    unicode = str
+from http.cookiejar import CookieJar
 
 import gevent
 from gevent.timeout import Timeout
 from geventhttpclient.useragent import UserAgent, CompatRequest, CompatResponse, ConnectionError
 from geventhttpclient.response import HTTPConnectionClosed
 
-from locust import events
-from locust.core import Locust
+from locust.user import User
 from locust.exception import LocustError, CatchResponseError, ResponseError
-
+from locust.env import Environment
+from locust.util.deprecation import DeprecatedFastHttpLocustClass as FastHttpLocust
 
 # Monkey patch geventhttpclient.useragent.CompatRequest so that Cookiejar works with Python >= 3.3
 # More info: https://github.com/requests/requests/pull/871
@@ -55,12 +48,14 @@ def _construct_basic_auth_str(username, password):
     return 'Basic ' + b64encode(b':'.join((username, password))).strip().decode("ascii")
 
 
-class FastHttpLocust(Locust):
+class FastHttpUser(User):
     """
-    Represents an HTTP "user" which is to be hatched and attack the system that is to be load tested.
+    FastHttpUser uses a different HTTP client (geventhttpclient) compared to HttpUser (python-requests).
+    It's significantly faster, but not as capable.
     
-    The behaviour of this user is defined by the task_set attribute, which should point to a 
-    :py:class:`TaskSet <locust.core.TaskSet>` class.
+    The behaviour of this user is defined by it's tasks. Tasks can be declared either directly on the 
+    class by using the :py:func:`@task decorator <locust.task>` on the methods, or by setting 
+    the :py:attr:`tasks attribute <locust.User.tasks>`.
     
     This class creates a *client* attribute on instantiation which is an HTTP client with support 
     for keeping a user session between requests.
@@ -68,32 +63,72 @@ class FastHttpLocust(Locust):
     
     client = None
     """
-    Instance of HttpSession that is created upon instantiation of Locust. 
+    Instance of HttpSession that is created upon instantiation of User. 
     The client support cookies, and therefore keeps the session between HTTP requests.
     """
     
-    def __init__(self):
-        super(FastHttpLocust, self).__init__()
+    # Below are various UserAgent settings. Change these in your subclass to alter FastHttpUser's behaviour.
+    # It needs to be done before FastHttpUser is instantiated, changing them later will have no effect
+    
+    network_timeout: float = 60.0
+    """Parameter passed to FastHttpSession"""
+    
+    connection_timeout: float = 60.0
+    """Parameter passed to FastHttpSession"""
+    
+    max_redirects: int = 5
+    """Parameter passed to FastHttpSession. Default 5, meaning 4 redirects."""
+    
+    max_retries: int = 1
+    """Parameter passed to FastHttpSession. Default 1, meaning zero retries."""
+    
+    insecure: bool = True
+    """Parameter passed to FastHttpSession. Default True, meaning no SSL verification."""
+
+    abstract = True 
+    """Dont register this as a User class that can be run by itself"""
+
+    def __init__(self, environment):
+        super().__init__(environment)
         if self.host is None:
-            raise LocustError("You must specify the base host. Either in the host attribute in the Locust class, or on the command line using the --host option.")
-        if not re.match(r"^https?://[^/]+$", self.host, re.I):
-            raise LocustError("Invalid host (`%s`). The specified host string must be a base URL without a trailing slash. E.g. http://example.org" % self.host)
+            raise LocustError("You must specify the base host. Either in the host attribute in the User class, or on the command line using the --host option.")
+        if not re.match(r"^https?://[^/]+", self.host, re.I):
+            raise LocustError("Invalid host (`%s`), must be a valid base URL. E.g. http://example.com" % self.host)
         
-        self.client = FastHttpSession(base_url=self.host)
+        self.client = FastHttpSession(
+            self.environment, 
+            base_url=self.host, 
+            network_timeout=self.network_timeout, 
+            connection_timeout=self.connection_timeout, 
+            max_redirects=self.max_redirects, 
+            max_retries=self.max_retries, 
+            insecure=self.insecure,
+        )
+
+
+def insecure_ssl_context_factory():
+    context = gevent.ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = gevent.ssl.CERT_NONE
+    return context
 
 
 class FastHttpSession(object):
     auth_header = None
     
-    def __init__(self, base_url, **kwargs):
+    def __init__(self, environment: Environment, base_url: str, insecure=True, **kwargs):
+        self.environment = environment
         self.base_url = base_url
         self.cookiejar = CookieJar()
+        if insecure:
+            ssl_context_factory = insecure_ssl_context_factory
+        else:
+            ssl_context_factory = gevent.ssl.create_default_context
         self.client = LocustUserAgent(
-            max_retries=1, 
-            cookiejar=self.cookiejar, 
-            insecure=True, 
-            ssl_options={"cert_reqs": gevent.ssl.CERT_NONE}, 
-            **kwargs
+            cookiejar=self.cookiejar,
+            ssl_context_factory=ssl_context_factory,
+            insecure=insecure,
+            **kwargs,
         )
         
         # Check for basic authentication
@@ -130,8 +165,8 @@ class FastHttpSession(object):
             r.error = e
             return r
     
-    def request(self, method, path, name=None, data=None, catch_response=False, stream=False, \
-                headers=None, auth=None, **kwargs):
+    def request(self, method: str, path: str, name: str=None, data: str=None, catch_response: bool=False, stream: bool=False,
+                headers: dict=None, auth=None, json: dict=None, allow_redirects=True, **kwargs):
         """
         Send and HTTP request
         Returns :py:class:`locust.contrib.fasthttp.FastResponse` object.
@@ -148,7 +183,10 @@ class FastHttpSession(object):
             request to be marked as a fail based on the content of the response, even if the response 
             code is ok (2xx). The opposite also works, one can use catch_response to catch a request 
             and then mark it as successful even if the response code was not (i.e 500 or 404).
-        :param data: (optional) Dictionary or bytes to send in the body of the request.
+        :param data: (optional) String/bytes to send in the body of the request.
+        :param json: (optional) Dictionary to send in the body of the request. 
+            Automatically sets Content-Type and Accept headers to "application/json".
+            Only used if data is not set.
         :param headers: (optional) Dictionary of HTTP Headers to send with the request.
         :param auth: (optional) Auth (username, password) tuple to enable Basic HTTP Auth.
         :param stream: (optional) If set to true the response body will not be consumed immediately 
@@ -171,12 +209,26 @@ class FastHttpSession(object):
             headers['Authorization'] = _construct_basic_auth_str(auth[0], auth[1])
         elif self.auth_header:
             headers['Authorization'] = self.auth_header
-        if not "Accept-Encoding" in headers:
+        if "Accept-Encoding" not in headers and "accept-encoding" not in headers:
             headers['Accept-Encoding'] = "gzip, deflate"
 
+        if not data and json is not None:
+            data = unshadowed_json.dumps(json)
+            if "Content-Type" not in headers and "content-type" not in headers:
+                headers['Content-Type'] = "application/json"
+            if "Accept" not in headers and "accept" not in headers:
+                headers['Accept'] = "application/json"
+
+        if not allow_redirects:
+            old_redirect_response_codes = self.client.redirect_resonse_codes
+            self.client.redirect_resonse_codes = []
+        
         # send request, and catch any exceptions
         response = self._send_request_safe_mode(method, url, payload=data, headers=headers, **kwargs)
-        
+
+        if not allow_redirects:
+            self.client.redirect_resonse_codes = old_redirect_response_codes
+
         # get the length of the content, but if the argument stream is set to True, we take
         # the size from the content-length header, in order to not trigger fetching of the body
         if stream:
@@ -191,12 +243,12 @@ class FastHttpSession(object):
         
         if catch_response:
             response.locust_request_meta = request_meta
-            return ResponseContextManager(response)
+            return ResponseContextManager(response, environment=self.environment)
         else:
             try:
                 response.raise_for_status()
             except FAILURE_EXCEPTIONS as e:
-                events.request_failure.fire(
+                self.environment.events.request_failure.fire(
                     request_type=request_meta["method"], 
                     name=request_meta["name"], 
                     response_time=request_meta["response_time"], 
@@ -204,7 +256,7 @@ class FastHttpSession(object):
                     exception=e, 
                 )
             else:
-                events.request_success.fire(
+                self.environment.events.request_success.fire(
                     request_type=request_meta["method"],
                     name=request_meta["name"],
                     response_time=request_meta["response_time"],
@@ -246,35 +298,36 @@ class FastResponse(CompatResponse):
     
     _response = None
     
+    encoding: str = None
+    """In some cases setting the encoding explicitly is needed. If so, do it before calling .text"""
+
     @property
-    def text(self):
+    def text(self) -> str:
         """
         Returns the text content of the response as a decoded string
-        (unicode on python2)
         """
-        try:
-            charset = self.headers.get('content-type', '').partition("charset=")[2]
-            content = unicode(self.content, charset or 'utf-8', errors='replace')
-        except (LookupError, TypeError):
-            # A LookupError is raised if the encoding was not found which could
-            # indicate a misspelling or similar mistake.
-            #
-            # A TypeError can be raised if encoding is None
-            #
-            # Fallback to decode without specifying encoding
-            if self.content is None:
-                content = None
+        if self.content is None:
+            return None
+        if self.encoding is None:
+            if self.headers is None:
+                self.encoding = 'utf-8'
             else:
-                content = unicode(self.content, errors='replace')
-        return content
-    
+                self.encoding = self.headers.get('content-type', '').partition("charset=")[2] or 'utf-8'
+        return str(self.content, self.encoding, errors='replace')
+
+    def json(self) -> dict:
+        """
+        Parses the response as json and returns a dict
+        """
+        return json.loads(self.text)
+
     def raise_for_status(self):
         """Raise any connection errors that occured during the request"""
         if hasattr(self, 'error') and self.error:
             raise self.error
     
     @property
-    def status_code(self):
+    def status_code(self) -> int:
         """
         We override status_code in order to return None if no valid response was 
         returned. E.g. in the case of connection errors
@@ -305,6 +358,9 @@ class LocustUserAgent(UserAgent):
     response_type = FastResponse
     valid_response_codes = frozenset([200, 201, 202, 203, 204, 205, 206, 207, 208, 226, 301, 302, 303, 307])
     
+    def __init__(self, **kwargs):
+        super(LocustUserAgent, self).__init__(**kwargs)
+
     def _urlopen(self, request):
         """Override _urlopen() in order to make it use the response_type attribute"""
         client = self.clientpool.get_client(request.url_split)
@@ -323,35 +379,59 @@ class ResponseContextManager(FastResponse):
     and :py:meth:`failure <locust.contrib.fasthttp.ResponseContextManager.failure>`.
     """
     
-    _is_reported = False
+    _manual_result = None
     
-    def __init__(self, response):
+    def __init__(self, response, environment):
         # copy data from response to this object
         self.__dict__ = response.__dict__
         self._cached_content = response.content
+        # store reference to locust Environment
+        self.environment = environment
     
     def __enter__(self):
         return self
     
     def __exit__(self, exc, value, traceback):
-        if self._is_reported:
+        if self._manual_result is not None:
+            if self._manual_result == True:
+                self._report_success()
+            elif isinstance(self._manual_result, Exception):
+                self._report_failure(self._manual_result)
+            
             # if the user has already manually marked this response as failure or success
             # we can ignore the default haviour of letting the response code determine the outcome
-            return exc is None
+            return exc is None        
         
         if exc:
             if isinstance(value, ResponseError):
-                self.failure(value)
+                self._report_failure(value)
             else:
                 return False
         else:
             try:
                 self.raise_for_status()
             except FAILURE_EXCEPTIONS as e:
-                self.failure(e)
+                self._report_failure(e)
             else:
-                self.success()
+                self._report_success()
         return True
+    
+    def _report_success(self):
+        self.environment.events.request_success.fire(
+            request_type=self.locust_request_meta["method"],
+            name=self.locust_request_meta["name"],
+            response_time=self.locust_request_meta["response_time"],
+            response_length=self.locust_request_meta["content_size"],
+        )
+    
+    def _report_failure(self, exc):
+        self.environment.events.request_failure.fire(
+            request_type=self.locust_request_meta["method"],
+            name=self.locust_request_meta["name"],
+            response_time=self.locust_request_meta["response_time"],
+            response_length=self.locust_request_meta["content_size"],
+            exception=exc,
+        )
     
     def success(self):
         """
@@ -363,13 +443,7 @@ class ResponseContextManager(FastResponse):
                 if response.status_code == 404:
                     response.success()
         """
-        events.request_success.fire(
-            request_type=self.locust_request_meta["method"],
-            name=self.locust_request_meta["name"],
-            response_time=self.locust_request_meta["response_time"],
-            response_length=self.locust_request_meta["content_size"],
-        )
-        self._is_reported = True
+        self._manual_result = True
     
     def failure(self, exc):
         """
@@ -384,14 +458,6 @@ class ResponseContextManager(FastResponse):
                 if response.content == "":
                     response.failure("No data")
         """
-        if isinstance(exc, six.string_types):
+        if isinstance(exc, str):
             exc = CatchResponseError(exc)
-        
-        events.request_failure.fire(
-            request_type=self.locust_request_meta["method"],
-            name=self.locust_request_meta["name"],
-            response_time=self.locust_request_meta["response_time"],
-            response_length=self.locust_request_meta["content_size"],
-            exception=exc,
-        )
-        self._is_reported = True
+        self._manual_result = exc
