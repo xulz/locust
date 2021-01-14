@@ -195,6 +195,7 @@ class Runner:
                 user_class = bucket.pop(random.randint(0, len(bucket) - 1))
                 occurrence_count[user_class.__name__] += 1
                 new_user = user_class(self.environment)
+                new_user.id = len(bucket)
                 new_user.start(self.user_greenlets)
                 if len(self.user_greenlets) % 10 == 0:
                     logger.debug("%i users spawned" % len(self.user_greenlets))
